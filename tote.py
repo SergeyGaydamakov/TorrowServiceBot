@@ -7,6 +7,25 @@ from datetime import datetime
 from dateutil.parser import parse
 from collections.abc import Iterable
 
+class StepData():
+    """Структура для описания шага записи на услугу"""
+    name: str = None
+    values: [str] = None
+
+    def __init__(self, name, values):
+        self.name = name
+        self.values = values
+
+type StepDataList = dict(StepData)
+class ServiceData():
+    """Структура для описания услуги"""
+    name: str = None
+    steps: StepData = None
+    def __init__(self, name, steps):
+        self.name = name
+        self.steps = steps
+
+
 class BaseTote():
     def __init__(self):
         return
@@ -222,7 +241,14 @@ class OpenAITote(ContextedTote):
         full_message: OpenAI.ChatCompletionMessage
         full_message = response.choices[0].message
         if (response.choices[0].finish_reason == "tool_calls"):
-            result = self._tools_execute(full_message)
+            try:
+                result = self._tools_execute(full_message)
+            except Exception as e:
+                print("Невозможно выполнить функцию.")
+                print(f"Exception: {e}")
+                self.complete_conversation()
+                return
+
             if result:
                 message = {
                         "role": "function",
@@ -253,7 +279,7 @@ class ChooseTimeTote( OpenAITote ):
         self._choosen_time = None
         self._tote_messages = tote_messages
         messages = []
-        messages.append({"role": "system", "content": "Не делай предположений о том, какие значения следует передавать в функцию. Попроси разъяснений, если запрос пользователя неоднозначен. Пользователь должен выбрать дату и время из ограниченного списка свободных дат и времени. Если свободного времени много, то сгруппируй его по датам."})
+        messages.append({"role": "system", "content": "Не делай предположений о том, какие значения следует передавать в функцию. Попроси разъяснений, если запрос пользователя неоднозначен. Сохрани выбранную пользователем дату и время из списка свободных дат и времени. Если свободного времени много, то сгруппируй его по датам."})
         messages.append({"role": "user", "content": "Я хочу записаться на свободную дату и время"})
         super().__init__(context, openai_client, messages)
 
@@ -297,7 +323,8 @@ class ChooseTimeTote( OpenAITote ):
             print(colored("Выбрано время: " + self._choosen_time.strftime("%d.%m.%Y %H:%M"), "blue"))
             if self._tote_messages:
                 self._tote_messages.clear()
-                self._tote_messages.add_message(role="assistant", content="Пользователь выбрал дату и время "+self._choosen_time.strftime("%d.%m.%Y %H:%M"))
+                self._tote_messages.add_message(role="user", content="Я выбираю дату и время "+self._choosen_time.strftime("%d.%m.%Y %H:%M"))
+            self.complete_conversation()
         except ValueError:
             self._choosen_time = None
             print(colored("Указано время некорректном формате: " + choosen_time, "blue"))
@@ -311,7 +338,7 @@ class ChooseTimeTote( OpenAITote ):
             choosen_time = json.loads(full_message.tool_calls[0].function.arguments)["choosen_time"]
             results = self._set_choosen_time(choosen_time)
         else:
-            results = f"Error: function {full_message.tool_calls[0].function.name} does not exist"
+            raise Exception(f"Функция '{full_message.tool_calls[0].function.name}' не существует.")
         return results
         
     @typing.override
@@ -322,29 +349,97 @@ class ChooseTimeTote( OpenAITote ):
     def test1(self) -> float:
         return 2.0
 
+
+class ChooseStepTote( OpenAITote ):
+    _choosen_time = None
+    _tote_messages: ToteMessages = None
+    _step_data: StepData = None
+
+    def __init__(self, context: ToteContext, openai_client, tote_messages: ToteMessages, step_data):
+        self._choosen_time = None
+        self._tote_messages = tote_messages
+        self._step_data = step_data
+        messages = []
+        messages.append({"role": "system", "content": f"Не делай предположений о том, какие значения следует передавать в функцию. Попроси разъяснений, если запрос пользователя неоднозначен. Пользователь должен выбрать '{self._step_data.name}'."})
+        messages.append({"role": "user", "content": f"Какой '{self._step_data.name}' можно выбрать?"})
+        super().__init__(context, openai_client, messages)
+
+    def _get_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_resources",
+                    "description": f"Используй эту функцию, чтобы получить список '{self._step_data.name}'"
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "set_resources",
+                    "description": f"Используй эту функцию, чтобы сохранить выбранный пользователем '{self._step_data.name}'",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "choosen_resource": {
+                                "type": "string",
+                                "description": "Выбранный пользователем 'Вид стрижки'",
+                            }
+                        },
+                        "required": ["choosen_resource"]
+                    },
+                }
+            },
+        ]
+
+    def _get_resources(self):
+        print(colored(f"Запрошены '{self._step_data.name}'", "blue"))
+        return ", ".join(self._step_data.values)
+
+    def _set_resources(self, choosen_resource):
+        self._choosen_resource = choosen_resource
+        print(colored(f"Выбран '{self._step_data.name}': '{self._choosen_resource}'", "blue"))
+        if self._tote_messages:
+            self._tote_messages.clear()
+            self._tote_messages.add_message(role="user", content=f"Я выбираю для '{self._step_data.name}' значение '{self._choosen_resource}'")
+        self.complete_conversation()
+        return self._choosen_resource
+
+    def _tools_execute(self, full_message: OpenAI_ChatCompletionMessage) -> str:
+        result: str = ""
+        if full_message.tool_calls[0].function.name == "get_resources":
+            results = self._get_resources()
+        elif full_message.tool_calls[0].function.name == "set_resources":
+            choosen_resource = json.loads(full_message.tool_calls[0].function.arguments)["choosen_resource"]
+            results = self._set_resources(choosen_resource)
+        else:
+            raise Exception(f"Функция '{full_message.tool_calls[0].function.name}' не существует.")
+        return results
+        
     @typing.override
-    def operation(self):
-        super().operation()
+    def name(self) -> str:
+        return "ChooseStepTote"
 
     @typing.override
-    def test2(self) -> bool:
-        return super().test2() or (self._choosen_time != None)
-
-    @typing.override
-    def exit(self):
-        super().exit()
-        return
+    def test1(self) -> float:
+        return 3.0
 
 
 class ServiceTote( OpenAITote ):
+    _service_data: ServiceData
     _choose_time_messages: ToteMessages = None
+    _choose_step_messages: ToteMessages = None
 
-    def __init__(self, context, openai_client):
-        self._choosen_time = None
+    def __init__(self, context, openai_client, service_data):
         self._choose_time_messages = ToteMessages()
+        self._choose_step_messages = ToteMessages()
+        self._service_data = service_data
         messages = []
-        messages.append({"role": "system", "content": "Используй функции по назначению. Тебе нужно записать пользователя на услугу, для этого нужно получить от пользователя дату и время."})
-        messages.append({"role": "user", "content": "Я хочу записаться на услугу Стрижка"})
+        messages.append({"role": "system", "content": f"Ты должен записать пользователя на услугу '{self._service_data.name}'."})
+        #messages.append({"role": "assistant", "content": "Для записи на услугу пользователь должен выбрать 'Вид стрижки', дату и время записи на услугу."})
+        messages.append({"role": "user", "content": f"Я хочу записаться на услугу '{self._service_data.name}'"})
+        #messages.append({'role': 'user', 'content': 'Я выбираю дату и время 10.03.2024 10:00'})
+        #messages.append({'role': 'user', 'content': 'Я выбираю "Вид стрижки" "Каре"'})
         super().__init__(context, openai_client, messages)
 
     def _get_tools(self):
@@ -353,40 +448,72 @@ class ServiceTote( OpenAITote ):
                 "type": "function",
                 "function": {
                     "name": "_choose_time",
-                    "description": "Используй эту функцию, чтобы получить время записи на услугу"
+                    "description": "Используй эту функцию, чтобы пользователь смог выбрать дату и время записи на услугу"
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "_choose_step",
+                    "description": "Используй эту функцию, чтобы пользователь смог выбрать 'Вид стрижки'"
                 }
             },
             {
                 "type": "function",
                 "function": {
                     "name": "_complete",
-                    "description": "Используй эту функцию, когда получишь всю информацию для записи на услугу"
+                    "description": "Используй эту функцию, чтобы записать пользователя на услугу, когда подтвердишь полученную от пользователя информацию",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "choosen_time": {
+                                "type": "string",
+                                "description": "Выбранное дата и время формате dd.mm.yyyy hh:mm, например 12.03.2024 10:00",
+                            },
+                            "choosen_step": {
+                                "type": "string",
+                                "description": "Выбранный 'Вид стрижки'",
+                            }
+                        },
+                        "required": ["choosen_time"]
+                    }
                 }
             },
         ]
 
     def _get_chat_messages(self):
         """Сообщения для AI"""
-        return self._chat_messages + self._choose_time_messages.get_list()
+        return self._chat_messages + self._choose_time_messages.get_list() + self._choose_step_messages.get_list()
 
     def _choose_time(self) -> str:
         print(colored("Выбор времени", "blue"))
         ChooseTimeTote(context=self._context, openai_client=self._openai_client, tote_messages=self._choose_time_messages)
         return None
+    
+    def _choose_step(self, step_name) -> str:
+        service_step = self._service_data.steps[step_name]
+        print(colored(f"Выбор '{service_step.name}'", "blue"))
+        ChooseStepTote(context=self._context, openai_client=self._openai_client, tote_messages=self._choose_step_messages, step_data=service_step)
+        return None
 
-    def _complete(self):
+    def _complete(self, choosen_time, choosen_step) -> str:
+        print(colored("Запись на услугу " + choosen_time + " для " + choosen_step, "blue"))
         self.complete_conversation()
-        return
+        return None
 
     def _tools_execute(self, full_message: OpenAI_ChatCompletionMessage) -> str:
-        if full_message.tool_calls[0].function.name == "_choose_time":
-            results = self._choose_time()
-        elif full_message.tool_calls[0].function.name == "_complete":
-            #choosen_time = json.loads(full_message.tool_calls[0].function.arguments)["choosen_time"]
-            results = self._complete()
-        else:
-            results = f"Error: function {full_message.tool_calls[0].function.name} does not exist"
-        return results
+        for tool_call in full_message.tool_calls:
+            if tool_call.function.name == "_choose_time":
+                self._choose_time()
+            elif tool_call.function.name == "_choose_step":
+                self._choose_step("step1")
+            elif tool_call.function.name == "_complete":
+                choosen_time = json.loads(tool_call.function.arguments)["choosen_time"]
+                choosen_step = json.loads(tool_call.function.arguments)["choosen_step"]
+                self._complete(choosen_time, choosen_step)
+            else:
+                raise Exception(f"Функция '{full_message.tool_calls[0].function.name}' не существует.")
+        return None
         
     @typing.override
     def name(self) -> str:
@@ -418,12 +545,16 @@ def main():
         api_key=OPENAI_API_KEY,
         base_url=BASE_URL
     )
-    messages =[]
-    messages.append({"role": "system", "content": "Не делай предположений о том, какие значения следует передавать функцию. Попроси разъяснений, если запрос пользователя неоднозначен. Выясни на какое свободное время записать пользователя."})
-    messages.append({"role": "user", "content": "Какое время свободно для записи на услугу?"})
+
+    service_data = ServiceData(
+        name = "Стрижка", 
+        steps = {
+            "step1": StepData("Вид стрижки", ["Модельная стрижка", "Полубокс", "Каре", "Вьетнамка"])
+        }
+    )
     context = ToteContext()
-    ChooseTimeTote(context=context, openai_client=client, tote_messages=None)
-#    ServiceTote(context=context, openai_client=client)
+#    ChooseTimeTote(context=context, openai_client=client, tote_messages=None)
+    ServiceTote(context=context, openai_client=client, service_data = service_data)
     ToteCommunication(context).process()    
 
 if __name__ == '__main__':
