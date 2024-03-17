@@ -1,2 +1,4 @@
 environment.py
 Old/*.*
+*.ldb
+/__pycache__
