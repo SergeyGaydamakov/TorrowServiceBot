@@ -45,7 +45,7 @@ class ToteContext:
             del self._tote_dict[tote.name]
         return found_tote
 
-    def get_context(self) -> BaseToteList:
+    def get_tote_list(self) -> BaseToteList:
         return self._tote_dict.values()
 
     def is_empty(self) -> bool:
@@ -53,20 +53,20 @@ class ToteContext:
 
 type ToteMessageList = list()
 class ToteMessages:
-    _tote_messages: ToteMessageList = None
+    _list: ToteMessageList = None
 
     def __init__(self):
-        self._tote_messages = []
+        self._list = []
 
     def add_message(self, role: str, content: str) -> ToteMessageList:
-        self._tote_messages.append({"role": role, "content": content})
-        return self._tote_messages
+        self._list.append({"role": role, "content": content})
+        return self._list
 
     def get_list(self) -> ToteMessageList:
-        return self._tote_messages
+        return self._list
     
     def clear(self):
-        self._tote_messages.clear()
+        self._list.clear()
 
 class ContextedTote(BaseTote):
     _context: ToteContext = None
@@ -76,6 +76,7 @@ class ContextedTote(BaseTote):
         self._context.add_tote(self)
 
     def exit(self):
+        # Требуется удалить TOTE из контекста TOTE-ов
         self._context.remove_tote(self)
         super().exit()
         return
@@ -103,7 +104,7 @@ class ToteCommunication():
         preffered_tote: BaseTote = None
         preffered_tote_test1: float = 0.0    
         # Поиск Tote с максимальным test1
-        for tote in self._context.get_context():
+        for tote in self._context.get_tote_list():
             print(colored(tote.name(), "green"))
             test1: float = tote.test1()
             if preffered_tote == None and test1 > 0.0:
@@ -144,30 +145,27 @@ type OpenAI_ChatCompletionMessage = OpenAI.ChatCompletionMessage
 
 class OpenAITote(ContextedTote):
     _openai_client = None
-    _messages = []
-    _tools = None
-    _model = 'gpt-3.5-turbo-1106'
+    _chat_messages = []
     _is_conversation = None
 
-    def __init__(self, context, openai_client, messages, tools):
+    def __init__(self, context, openai_client, messages):
         super().__init__(context)
         self._openai_client = openai_client
-        self._messages = messages
-        self._tools = tools
+        self._chat_messages = messages
         self._is_conversation = True
 
     def _add_message(self, role, content):
         message = {"role": role, "content": content}
-        self._messages.append(message)
+        self._chat_messages.append(message)
 
-    def _pretty_print_conversation(messages):
+    def _pretty_print_conversation(self, messages):
         role_to_color = {
             "system": "red",
             "user": "green",
             "assistant": "blue",
             "function": "magenta",
         }
-        for message in self._messages:
+        for message in messages:
             if message["role"] == "system":
                 print(colored(f"system: {message['content']}\n", role_to_color[message["role"]]))
             elif message["role"] == "user":
@@ -179,19 +177,29 @@ class OpenAITote(ContextedTote):
             elif message["role"] == "function":
                 print(colored(f"function ({message['name']}): {message['content']}\n", role_to_color[message["role"]]))
 
-    def ai_messages(self):
+    def complete_conversation(self):
+        self._is_conversation = False
+        print(colored("[" + self.name() + "] Разговор завершен", "green"))
+
+    def _get_chat_messages(self):
         """Сообщения для AI"""
-        return self._messages
+        return self._chat_messages
+
+    def _get_tools(self):
+        return None
 
     def _chat_completion_request(self):
+        model = 'gpt-3.5-turbo-1106'
         try:
-            msg = self.ai_messages()
-            print(colored(msg, "red"))
+            messages = self._get_chat_messages()
+            print(colored(messages, "red"))
             response: ChatCompletion = None
             response = self._openai_client.chat.completions.create(
-                model= self._model,
-                messages= msg,
-                tools= self._tools,
+                model= model,
+                frequency_penalty = 0.0,
+                presence_penalty = 0.0,
+                messages= messages,
+                tools= self._get_tools(),
                 response_format= { "type": "text" },
                 temperature= 0.2
             )
@@ -205,17 +213,11 @@ class OpenAITote(ContextedTote):
     def _tools_execute(self, full_message: OpenAI_ChatCompletionMessage) -> str:
         return None
 
-    def name(self) -> str:
-        return "OpenAITote"
-
-    def test1(self) -> float:
-        return 1.0
-
     def operation(self):
         response: OpenAI.ChatCompletion
         response = self._chat_completion_request()
         if (response == None):
-            self._is_conversation = False
+            self.complete_conversation()
             return
         full_message: OpenAI.ChatCompletionMessage
         full_message = response.choices[0].message
@@ -229,7 +231,7 @@ class OpenAITote(ContextedTote):
                         "content": str(result),
                     }
                 #print(colored(message, "grey"))
-                self._messages.append(message)
+                self._chat_messages.append(message)
         else:
             print(colored(full_message.content,"grey"))
             user_message = input()
@@ -253,7 +255,10 @@ class ChooseTimeTote( OpenAITote ):
         messages = []
         messages.append({"role": "system", "content": "Не делай предположений о том, какие значения следует передавать в функцию. Попроси разъяснений, если запрос пользователя неоднозначен. Пользователь должен выбрать дату и время из ограниченного списка свободных дат и времени. Если свободного времени много, то сгруппируй его по датам."})
         messages.append({"role": "user", "content": "Я хочу записаться на свободную дату и время"})
-        tools = [
+        super().__init__(context, openai_client, messages)
+
+    def _get_tools(self):
+        return [
             {
                 "type": "function",
                 "function": {
@@ -279,7 +284,6 @@ class ChooseTimeTote( OpenAITote ):
                 }
             },
         ]
-        super().__init__(context, openai_client, messages, tools)
 
     def _get_available_time(self):
         print(colored("Запрошено доступное время записи", "blue"))
@@ -291,8 +295,9 @@ class ChooseTimeTote( OpenAITote ):
             self._choosen_time = datetime.strptime(choosen_time, "%d.%m.%Y %H:%M")
             #self._choosen_time = parse(choosen_time)
             print(colored("Выбрано время: " + self._choosen_time.strftime("%d.%m.%Y %H:%M"), "blue"))
-            self._tote_messages.clear()
-            self._tote_messages.add_message(role="assistant", content="Пользователь выбрал дату и время "+self._choosen_time.strftime("%d.%m.%Y %H:%M"))
+            if self._tote_messages:
+                self._tote_messages.clear()
+                self._tote_messages.add_message(role="assistant", content="Пользователь выбрал дату и время "+self._choosen_time.strftime("%d.%m.%Y %H:%M"))
         except ValueError:
             self._choosen_time = None
             print(colored("Указано время некорректном формате: " + choosen_time, "blue"))
@@ -332,16 +337,18 @@ class ChooseTimeTote( OpenAITote ):
 
 
 class ServiceTote( OpenAITote ):
-    _choosen_time = None
     _choose_time_messages: ToteMessages = None
 
     def __init__(self, context, openai_client):
         self._choosen_time = None
         self._choose_time_messages = ToteMessages()
         messages = []
-        messages.append({"role": "system", "content": "Не делай предположений о том, какие значения следует передавать в функцию. Тебе нужно собрать информацию от пользователя: дату и время."})
+        messages.append({"role": "system", "content": "Используй функции по назначению. Тебе нужно записать пользователя на услугу, для этого нужно получить от пользователя дату и время."})
         messages.append({"role": "user", "content": "Я хочу записаться на услугу Стрижка"})
-        tools = [
+        super().__init__(context, openai_client, messages)
+
+    def _get_tools(self):
+        return [
             {
                 "type": "function",
                 "function": {
@@ -353,15 +360,14 @@ class ServiceTote( OpenAITote ):
                 "type": "function",
                 "function": {
                     "name": "_complete",
-                    "description": "Используй эту функцию, когда получена вся информация для записи на услугу"
+                    "description": "Используй эту функцию, когда получишь всю информацию для записи на услугу"
                 }
             },
         ]
-        super().__init__(context, openai_client, messages, tools)
 
-    def ai_messages(self):
+    def _get_chat_messages(self):
         """Сообщения для AI"""
-        return self._messages + self._choose_time_messages.get_list()
+        return self._chat_messages + self._choose_time_messages.get_list()
 
     def _choose_time(self) -> str:
         print(colored("Выбор времени", "blue"))
@@ -369,8 +375,7 @@ class ServiceTote( OpenAITote ):
         return None
 
     def _complete(self):
-        print(colored("Завершен сбор информации", "blue"))
-        self._is_conversation = False
+        self.complete_conversation()
         return
 
     def _tools_execute(self, full_message: OpenAI_ChatCompletionMessage) -> str:
@@ -397,7 +402,7 @@ class ServiceTote( OpenAITote ):
 
     @typing.override
     def test2(self) -> bool:
-        return super().test2() or (self._choosen_time != None)
+        return super().test2()
 
     @typing.override
     def exit(self):
@@ -417,8 +422,8 @@ def main():
     messages.append({"role": "system", "content": "Не делай предположений о том, какие значения следует передавать функцию. Попроси разъяснений, если запрос пользователя неоднозначен. Выясни на какое свободное время записать пользователя."})
     messages.append({"role": "user", "content": "Какое время свободно для записи на услугу?"})
     context = ToteContext()
-#    ChooseTimeTote(context=context, openai_client=client)
-    ServiceTote(context=context, openai_client=client)
+    ChooseTimeTote(context=context, openai_client=client, tote_messages=None)
+#    ServiceTote(context=context, openai_client=client)
     ToteCommunication(context).process()    
 
 if __name__ == '__main__':
